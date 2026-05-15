@@ -619,12 +619,12 @@ const styles = {
   overlay: {
     position: 'fixed',
     inset: 0,
-    background: 'rgba(0,0,0,0.92)',
+    background: 'rgba(0,0,0,0.97)',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
     padding: '2rem',
-    zIndex: 100,
+    zIndex: 9999,
   },
   outcomeCard: {
     background: '#0a0a0a',
