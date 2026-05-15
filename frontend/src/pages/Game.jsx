@@ -2,10 +2,42 @@ import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import api from '../utils/api'
 
+// ─── Strip outcome tags and parse choices from raw AI text ───────────────────
+function parseAIReply(text) {
+  if (!text) return { clean: '', choices: [] }
+
+  // Remove outcome tag
+  let clean = text.replace(/\[OUTCOME:(WIN|FAIL|CONTINUE)\]/gi, '')
+
+  // Try [CHOICES]...[/CHOICES] block
+  const blockMatch = clean.match(/\[CHOICES\]([\s\S]*?)\[\/CHOICES\]/i)
+  if (blockMatch) {
+    const choices = blockMatch[1]
+      .split('\n')
+      .map(l => l.replace(/^\d+\.\s*/, '').trim())
+      .filter(l => l.length > 0)
+    clean = clean.replace(/\[CHOICES\][\s\S]*?\[\/CHOICES\]/gi, '').trim()
+    return { clean, choices }
+  }
+
+  // Fallback: detect inline "1. ... 2. ... 3. ..." pattern
+  const inlineMatch = clean.match(/(1\.\s+.+?)\s+(2\.\s+.+?)\s+(3\.\s+.+?)(\s*$)/s)
+  if (inlineMatch) {
+    const cutIndex = clean.search(/1\.\s+/)
+    const choices = [inlineMatch[1], inlineMatch[2], inlineMatch[3]]
+      .map(c => c.replace(/^\d+\.\s*/, '').trim())
+    clean = clean.slice(0, cutIndex).trim()
+    return { clean, choices }
+  }
+
+  return { clean: clean.trim(), choices: [] }
+}
+
 export default function Game() {
   const navigate = useNavigate()
   const [session, setSession] = useState(null)
   const [messages, setMessages] = useState([])
+  const [choices, setChoices] = useState([])
   const [input, setInput] = useState('')
   const [loading, setLoading] = useState(true)
   const [thinking, setThinking] = useState(false)
@@ -13,32 +45,41 @@ export default function Game() {
   const [nextChapter, setNextChapter] = useState(null)
   const bottomRef = useRef(null)
 
-  useEffect(() => {
-    fetchSession()
-  }, [])
+  useEffect(() => { fetchSession() }, [])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages, thinking])
+  }, [messages, thinking, choices])
 
   const fetchSession = async () => {
     try {
       const res = await api.get('/api/game/session')
       if (!res.data) return navigate('/dashboard')
       setSession(res.data)
-      setMessages(res.data.conversation || [])
-    } catch (err) {
+      // Clean any leftover tags from stored messages
+      const cleaned = (res.data.conversation || []).map(m => ({
+        ...m,
+        content: parseAIReply(m.content).clean
+      }))
+      setMessages(cleaned)
+    } catch {
       navigate('/dashboard')
     } finally {
       setLoading(false)
     }
   }
 
-  const sendMessage = async () => {
-    if (!input.trim() || thinking) return
+  const sendMessage = async (choiceText) => {
+    // choiceText is passed when clicking a choice button
+    // otherwise fall back to the textarea input
+    const userMessage = typeof choiceText === 'string'
+      ? choiceText.trim()
+      : input.trim()
 
-    const userMessage = input.trim()
+    if (!userMessage || thinking) return
+
     setInput('')
+    setChoices([])
     setMessages(prev => [...prev, { role: 'user', content: userMessage }])
     setThinking(true)
 
@@ -48,17 +89,30 @@ export default function Game() {
         message: userMessage
       })
 
-      setMessages(prev => [...prev, { role: 'assistant', content: res.data.reply }])
+      // Parse the reply — handles both clean and messy AI output
+      const { clean, choices: parsedChoices } = parseAIReply(res.data.reply || '')
+
+      // Prefer backend-parsed choices, fall back to frontend-parsed
+      const finalChoices = (res.data.choices && res.data.choices.length > 0)
+        ? res.data.choices
+        : parsedChoices
+
+      setMessages(prev => [...prev, { role: 'assistant', content: clean }])
 
       if (res.data.outcome === 'chapter_complete') {
         setNextChapter(res.data.next_chapter)
         setOutcome('chapter_complete')
+        setChoices([])
       } else if (res.data.outcome === 'game_won') {
         setOutcome('game_won')
+        setChoices([])
       } else if (res.data.outcome === 'game_over') {
         setOutcome('game_over')
+        setChoices([])
+      } else {
+        setChoices(finalChoices)
       }
-    } catch (err) {
+    } catch {
       setMessages(prev => [...prev, {
         role: 'assistant',
         content: '// transmission lost. try again.'
@@ -78,11 +132,8 @@ export default function Game() {
   const handleNextChapter = () => {
     setOutcome(null)
     setNextChapter(null)
+    setChoices([])
     fetchSession()
-  }
-
-  const handleNewCharacter = () => {
-    navigate('/dashboard')
   }
 
   if (loading) return (
@@ -117,20 +168,53 @@ export default function Game() {
 
       {/* Messages */}
       <div style={styles.messages}>
-        {messages.map((msg, i) => (
-          <div
-            key={i}
-            style={{
-              ...styles.message,
-              ...(msg.role === 'user' ? styles.userMessage : styles.aiMessage)
-            }}
-          >
-            <span style={msg.role === 'user' ? styles.userPrefix : styles.aiPrefix}>
-              {msg.role === 'user' ? '> YOU' : '// NOIR'}
-            </span>
-            <p style={styles.messageText}>{msg.content}</p>
-          </div>
-        ))}
+        {messages.map((msg, i) => {
+          const isLast = i === messages.length - 1
+          const isAI = msg.role === 'assistant'
+          return (
+            <div key={i}>
+              <div style={{
+                ...styles.message,
+                ...(msg.role === 'user' ? styles.userMessage : styles.aiMessage)
+              }}>
+                <span style={msg.role === 'user' ? styles.userPrefix : styles.aiPrefix}>
+                  {msg.role === 'user' ? '> YOU' : '// NOIR'}
+                </span>
+                <p style={styles.messageText}>{msg.content}</p>
+              </div>
+
+              {/* Choices — only after last AI message, not while thinking */}
+              {isAI && isLast && !thinking && choices.length > 0 && !outcome && (
+                <div style={styles.choicesWrap}>
+                  <p style={styles.choicesLabel}>// SUGGESTED ACTIONS</p>
+                  <div style={styles.choicesList}>
+                    {choices.map((choice, ci) => (
+                      <button
+                        key={ci}
+                        style={styles.choiceBtn}
+                        onClick={() => sendMessage(choice)}
+                        onMouseEnter={e => {
+                          e.currentTarget.style.background = '#111'
+                          e.currentTarget.style.borderColor = '#444'
+                          e.currentTarget.style.color = '#F5F5F0'
+                        }}
+                        onMouseLeave={e => {
+                          e.currentTarget.style.background = 'transparent'
+                          e.currentTarget.style.borderColor = '#222'
+                          e.currentTarget.style.color = '#888884'
+                        }}
+                      >
+                        <span style={styles.choiceIndex}>{ci + 1}.</span>
+                        {choice}
+                      </button>
+                    ))}
+                  </div>
+                  <p style={styles.choicesHint}>or type your own action below</p>
+                </div>
+              )}
+            </div>
+          )
+        })}
 
         {/* Thinking indicator */}
         {thinking && (
@@ -162,7 +246,7 @@ export default function Game() {
           />
           <button
             style={{ ...styles.sendBtn, opacity: thinking ? 0.4 : 1 }}
-            onClick={sendMessage}
+            onClick={() => sendMessage()}
             disabled={thinking}
           >
             SEND
@@ -176,9 +260,7 @@ export default function Game() {
           <div style={styles.outcomeCard} className='page-enter'>
             <p style={styles.outcomeLabel}>// CASE PROGRESS</p>
             <h2 style={styles.outcomeTitle}>CHAPTER COMPLETE</h2>
-            <p style={styles.outcomeDesc}>
-              Good work, Detective. The next chapter awaits.
-            </p>
+            <p style={styles.outcomeDesc}>Good work, Detective. The next chapter awaits.</p>
             {nextChapter && (
               <div style={styles.nextChapterPreview}>
                 <p style={styles.nextLabel}>NEXT —</p>
@@ -196,9 +278,7 @@ export default function Game() {
         <div style={styles.overlay}>
           <div style={styles.outcomeCard} className='page-enter'>
             <p style={styles.outcomeLabel}>// CASE CLOSED</p>
-            <h2 style={{ ...styles.outcomeTitle, fontSize: '2rem' }}>
-              YOU SOLVED IT
-            </h2>
+            <h2 style={{ ...styles.outcomeTitle, fontSize: '2rem' }}>YOU SOLVED IT</h2>
             <p style={styles.outcomeDesc}>
               The truth has been uncovered. Your detective has earned their rest.
             </p>
@@ -212,22 +292,16 @@ export default function Game() {
       {outcome === 'game_over' && (
         <div style={styles.overlay}>
           <div style={styles.outcomeCard} className='page-enter'>
-            <p style={{ ...styles.outcomeLabel, color: '#ff4444' }}>
-              // DETECTIVE RETIRED
-            </p>
+            <p style={{ ...styles.outcomeLabel, color: '#ff4444' }}>// DETECTIVE RETIRED</p>
             <h2 style={styles.outcomeTitle}>CASE FAILED</h2>
             <p style={styles.outcomeDesc}>
-              {session?.character?.name} has been added to the graveyard.
-              The killer walks free.
+              {session?.character?.name} has been added to the graveyard. The killer walks free.
             </p>
             <div style={styles.outcomeBtns}>
-              <button
-                style={styles.ghostBtn}
-                onClick={() => navigate('/graveyard')}
-              >
+              <button style={styles.ghostBtn} onClick={() => navigate('/graveyard')}>
                 VIEW GRAVEYARD
               </button>
-              <button style={styles.outcomeBtn} onClick={handleNewCharacter}>
+              <button style={styles.outcomeBtn} onClick={() => navigate('/dashboard')}>
                 NEW DETECTIVE
               </button>
             </div>
@@ -267,7 +341,6 @@ const styles = {
     fontFamily: 'var(--font-mono)',
     color: '#888884',
     fontSize: '0.9rem',
-    animation: 'flicker 2s infinite',
   },
   header: {
     display: 'flex',
@@ -290,9 +363,7 @@ const styles = {
     letterSpacing: '0.15em',
     cursor: 'pointer',
   },
-  headerCenter: {
-    textAlign: 'center',
-  },
+  headerCenter: { textAlign: 'center' },
   chapterLabel: {
     fontFamily: 'var(--font-mono)',
     fontSize: '0.65rem',
@@ -307,10 +378,7 @@ const styles = {
     letterSpacing: '0.15em',
     color: '#F5F5F0',
   },
-  headerRight: {
-    minWidth: '120px',
-    textAlign: 'right',
-  },
+  headerRight: { minWidth: '120px', textAlign: 'right' },
   characterName: {
     fontFamily: 'var(--font-mono)',
     fontSize: '0.75rem',
@@ -332,12 +400,8 @@ const styles = {
     flexDirection: 'column',
     gap: '0.4rem',
   },
-  userMessage: {
-    alignItems: 'flex-end',
-  },
-  aiMessage: {
-    alignItems: 'flex-start',
-  },
+  userMessage: { alignItems: 'flex-end' },
+  aiMessage: { alignItems: 'flex-start' },
   userPrefix: {
     fontFamily: 'var(--font-mono)',
     fontSize: '0.65rem',
@@ -349,7 +413,6 @@ const styles = {
     fontSize: '0.65rem',
     color: '#888884',
     letterSpacing: '0.2em',
-    animation: 'flicker 8s infinite',
   },
   messageText: {
     fontFamily: 'var(--font-mono)',
@@ -371,6 +434,49 @@ const styles = {
     animation: 'flicker 1s infinite',
     display: 'inline-block',
   },
+  choicesWrap: {
+    marginTop: '0.75rem',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.5rem',
+  },
+  choicesLabel: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: '0.6rem',
+    color: '#333',
+    letterSpacing: '0.2em',
+  },
+  choicesList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.4rem',
+  },
+  choiceBtn: {
+    background: 'transparent',
+    border: '1px solid #222',
+    color: '#888884',
+    fontFamily: 'var(--font-mono)',
+    fontSize: '0.8rem',
+    padding: '0.6rem 1rem',
+    textAlign: 'left',
+    cursor: 'pointer',
+    transition: 'all 0.15s ease',
+    display: 'flex',
+    gap: '0.75rem',
+    alignItems: 'center',
+    maxWidth: '500px',
+  },
+  choiceIndex: {
+    color: '#444',
+    minWidth: '16px',
+  },
+  choicesHint: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: '0.6rem',
+    color: '#2a2a2a',
+    letterSpacing: '0.1em',
+    marginTop: '0.25rem',
+  },
   inputWrap: {
     display: 'flex',
     alignItems: 'flex-start',
@@ -380,9 +486,7 @@ const styles = {
     background: '#000',
     maxWidth: '800px',
     width: '100%',
-    margin: '0 auto',
     alignSelf: 'center',
-    width: '100%',
   },
   inputPrefix: {
     fontFamily: 'var(--font-mono)',

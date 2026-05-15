@@ -83,14 +83,13 @@ router.post('/new', auth, async (req, res) => {
       model: MODEL,
       messages: [
         { role: 'system', content: buildSystemPrompt(chapter, character_name) },
-        { role: 'user',   content: `Begin the story. My detective's name is ${character_name}.` }
+        { role: 'user', content: `Begin the story. My detective's name is ${character_name}.` }
       ],
-      max_tokens: 500
+      max_tokens: 600
     });
 
     const rawOpening = opening.choices[0].message.content;
-    // Opening should never trigger an outcome, so just strip tags if present
-    const openingText = stripOutcomeTag(rawOpening);
+    const { cleanReply: openingText, choices: openingChoices } = parseOutcome(rawOpening);
 
     // Save opening to conversation
     await pool.query(
@@ -102,7 +101,8 @@ router.post('/new', auth, async (req, res) => {
       character,
       session,
       chapter: sanitizeChapter(chapter),
-      opening: openingText
+      opening: openingText,
+      choices: openingChoices
     });
   } catch (err) {
     console.error(err);
@@ -180,7 +180,7 @@ router.post('/action', auth, async (req, res) => {
     );
     const chapter = chapterResult.rows[0];
 
-    // Get conversation history (last 20 turns to keep context window sane)
+    // Get last 20 turns to keep context window sane
     const convResult = await pool.query(
       `SELECT role, content FROM conversations 
        WHERE session_id = $1 
@@ -190,7 +190,7 @@ router.post('/action', auth, async (req, res) => {
     );
     const history = convResult.rows.reverse();
 
-    // Save player message first
+    // Save player message
     await pool.query(
       'INSERT INTO conversations (session_id, role, content) VALUES ($1, $2, $3)',
       [session_id, 'user', message]
@@ -211,17 +211,16 @@ router.post('/action', auth, async (req, res) => {
     });
 
     const rawReply = response.choices[0].message.content;
+    const { cleanReply, outcome: aiOutcome, choices } = parseOutcome(rawReply);
 
-    // Parse outcome tag from AI reply
-    const { cleanReply, outcome: aiOutcome } = parseOutcome(rawReply);
-
-    // Save clean AI reply (without the hidden tag)
+    // Save clean AI reply
     await pool.query(
       'INSERT INTO conversations (session_id, role, content) VALUES ($1, $2, $3)',
       [session_id, 'assistant', cleanReply]
     );
 
-    // Handle outcomes
+    // ─── Handle outcomes ───────────────────────────────────────────────────
+
     if (aiOutcome === 'win') {
       const nextChapterResult = await pool.query(
         'SELECT * FROM chapters WHERE story_id = $1 AND chapter_number = $2',
@@ -243,7 +242,8 @@ router.post('/action', auth, async (req, res) => {
         return res.json({
           reply: cleanReply,
           outcome: 'chapter_complete',
-          next_chapter: sanitizeChapter(nextChapter)
+          next_chapter: sanitizeChapter(nextChapter),
+          choices: []
         });
       } else {
         await pool.query(
@@ -255,7 +255,7 @@ router.post('/action', auth, async (req, res) => {
           [character.id]
         );
 
-        return res.json({ reply: cleanReply, outcome: 'game_won' });
+        return res.json({ reply: cleanReply, outcome: 'game_won', choices: [] });
       }
     }
 
@@ -269,10 +269,12 @@ router.post('/action', auth, async (req, res) => {
         ['lost', session_id]
       );
 
-      return res.json({ reply: cleanReply, outcome: 'game_over' });
+      return res.json({ reply: cleanReply, outcome: 'game_over', choices: [] });
     }
 
-    res.json({ reply: cleanReply, outcome: 'continue' });
+    // Normal continue
+    res.json({ reply: cleanReply, outcome: 'continue', choices });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Server error' });
@@ -281,12 +283,8 @@ router.post('/action', auth, async (req, res) => {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/**
- * Build the system prompt for the AI narrator.
- * Win/fail conditions are secret — only the AI knows them.
- */
 function buildSystemPrompt(chapter, characterName) {
-  return `You are NOIR, the narrator of a dark sci-fi murder mystery called Nebula Noir.
+  return `You are NOIR, the narrator of a dark dystopian murder mystery called Nebula Noir.
 
 DETECTIVE: ${characterName}
 CHAPTER ${chapter.chapter_number}: ${chapter.title}
@@ -296,7 +294,7 @@ ${chapter.content}
 
 ═══ NARRATION RULES ═══
 - Narrate in second person ("You push open the door...").
-- Keep responses under 180 words. Be atmospheric, cinematic, and terse.
+- Keep narration under 180 words. Be atmospheric, cinematic, and terse.
 - Never break character. Never mention being an AI.
 - If the player goes wildly off-topic, redirect them back into the story naturally.
 - React to what the player does — reward clever deductions, punish recklessness.
@@ -306,42 +304,59 @@ ${chapter.content}
 WIN CONDITION: ${chapter.win_condition}
 FAIL CONDITION: ${chapter.fail_condition}
 
-═══ OUTCOME SIGNALING (CRITICAL) ═══
-After your narration, you MUST append exactly one of these tags on its own line:
-  [OUTCOME:CONTINUE]   — game goes on normally
-  [OUTCOME:WIN]        — the player has clearly met the win condition
-  [OUTCOME:FAIL]       — the player has clearly triggered the fail condition
+═══ RESPONSE FORMAT (follow this exactly, every single time) ═══
+Write your narration first. Then append the outcome tag and choices block.
 
-Only signal WIN or FAIL when the player has unmistakably met the condition through their actions or deductions. Do not trigger early. When in doubt, use CONTINUE.
+[OUTCOME:CONTINUE] or [OUTCOME:WIN] or [OUTCOME:FAIL]
 
-Example format:
-You find the bloodied keycard beneath the console...
+[CHOICES]
+1. <a short action the detective could take, max 10 words>
+2. <a different short action, max 10 words>
+3. <a bold, reckless, or morally grey action, max 10 words>
+[/CHOICES]
 
-[OUTCOME:CONTINUE]`;
+OUTCOME RULES:
+- Only signal WIN or FAIL when the player has unmistakably met the condition.
+- When in doubt, always use CONTINUE.
+
+CHOICES RULES:
+- Make choices feel specific to this exact moment in the story.
+- Choice 3 should always be the wild card — risky, dark, or unexpected.
+- The player can always ignore these and type their own action.
+
+Example:
+You find the bloodied keycard beneath the console. The hatch groans as cold air bleeds upward.
+
+[OUTCOME:CONTINUE]
+
+[CHOICES]
+1. Use the keycard and descend into the hatch
+2. Photograph the keycard and search the room first
+3. Pocket it and slip out before anyone arrives
+[/CHOICES]`;
 }
 
-/**
- * Parse [OUTCOME:X] tag from AI reply.
- * Returns { cleanReply, outcome } where outcome is 'win' | 'fail' | 'continue'
- */
 function parseOutcome(raw) {
-  const match = raw.match(/\[OUTCOME:(WIN|FAIL|CONTINUE)\]/i);
-  const outcome = match ? match[1].toLowerCase() : 'continue';
-  const cleanReply = raw.replace(/\[OUTCOME:(WIN|FAIL|CONTINUE)\]/gi, '').trim();
-  return { cleanReply, outcome };
+  const outcomeMatch = raw.match(/\[OUTCOME:(WIN|FAIL|CONTINUE)\]/i);
+  const outcome = outcomeMatch ? outcomeMatch[1].toLowerCase() : 'continue';
+
+  const choicesMatch = raw.match(/\[CHOICES\]([\s\S]*?)\[\/CHOICES\]/i);
+  let choices = [];
+  if (choicesMatch) {
+    choices = choicesMatch[1]
+      .split('\n')
+      .map(line => line.replace(/^\d+\.\s*/, '').trim())
+      .filter(line => line.length > 0);
+  }
+
+  const cleanReply = raw
+    .replace(/\[OUTCOME:(WIN|FAIL|CONTINUE)\]/gi, '')
+    .replace(/\[CHOICES\][\s\S]*?\[\/CHOICES\]/gi, '')
+    .trim();
+
+  return { cleanReply, outcome, choices };
 }
 
-/**
- * Strip any stray outcome tags (used on opening narration)
- */
-function stripOutcomeTag(text) {
-  return text.replace(/\[OUTCOME:(WIN|FAIL|CONTINUE)\]/gi, '').trim();
-}
-
-/**
- * Remove win_condition and fail_condition before sending chapter to frontend.
- * Players should never see these.
- */
 function sanitizeChapter(chapter) {
   const { win_condition, fail_condition, ...safe } = chapter;
   return safe;
