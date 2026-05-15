@@ -341,7 +341,7 @@ You find the bloodied keycard beneath the console. The hatch groans as cold air 
 }
 
 function parseOutcome(raw) {
-  const outcomeMatch = raw.match(/\[OUTCOME:(WIN|FAIL|CONTINUE)\]/i);
+  const outcomeMatch = raw.match(/\[M?OUTCOME:(WIN|FAIL|CONTINUE)\]/i);
   const outcome = outcomeMatch ? outcomeMatch[1].toLowerCase() : 'continue';
 
   const choicesMatch = raw.match(/\[CHOICES\]([\s\S]*?)\[\/CHOICES\]/i);
