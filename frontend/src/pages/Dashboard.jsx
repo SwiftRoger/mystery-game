@@ -137,17 +137,7 @@ export default function Dashboard() {
             <p style={styles.cardMeta}>// the ones who didn't make it</p>
           </div>
 
-          {/* Admin */}
-          <div
-            style={{ ...styles.card, cursor: 'pointer', animationDelay: '0.4s' }}
-            className='page-enter'
-            onClick={() => navigate('/admin')}
-          >
-            <div style={styles.cardIcon}>⚙</div>
-            <h2 style={styles.cardTitle}>ADMIN</h2>
-            <p style={styles.cardDesc}>Manage stories and chapters</p>
-            <p style={styles.cardMeta}>// story control panel</p>
-          </div>
+          
 
         </div>
       </main>

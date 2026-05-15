@@ -2,8 +2,13 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import api from '../utils/api'
 
+  const ADMIN_PASSWORD = 'Isabelroger12:)'
+
 export default function Admin() {
   const navigate = useNavigate()
+  const [unlocked, setUnlocked] = useState(false)
+  const [passwordInput, setPasswordInput] = useState('')
+  const [passwordError, setPasswordError] = useState(false)
   const [stories, setStories] = useState([])
   const [selectedStory, setSelectedStory] = useState(null)
   const [chapters, setChapters] = useState([])
@@ -154,6 +159,42 @@ export default function Admin() {
     setError('')
     setView('editChapter')
   }
+
+  if (!unlocked) return (
+    <div style={styles.lockScreen}>
+      <div style={styles.lockCard} className='page-enter'>
+        <p style={styles.lockLabel}>// RESTRICTED ACCESS</p>
+        <h2 style={styles.lockTitle}>ADMIN PANEL</h2>
+        <p style={styles.lockSub}>Enter the access code to continue</p>
+        <input
+          style={{ ...styles.input, marginBottom: '0.75rem' }}
+          type='password'
+          value={passwordInput}
+          onChange={e => { setPasswordInput(e.target.value); setPasswordError(false) }}
+          onKeyDown={e => {
+            if (e.key === 'Enter') {
+              if (passwordInput === ADMIN_PASSWORD) setUnlocked(true)
+              else setPasswordError(true)
+            }
+          }}
+          placeholder='Enter password'
+          autoFocus
+        />
+        {passwordError && (
+          <p style={styles.lockError}>// ACCESS DENIED</p>
+        )}
+        <button
+          style={styles.primaryBtn}
+          onClick={() => {
+            if (passwordInput === ADMIN_PASSWORD) setUnlocked(true)
+            else setPasswordError(true)
+          }}
+        >
+          UNLOCK
+        </button>
+      </div>
+    </div>
+  )
 
   if (loading) return (
     <div style={styles.loading}>
@@ -727,5 +768,47 @@ const styles = {
   textarea: {
     resize: 'vertical',
     lineHeight: 1.7,
+  },
+  lockScreen: {
+    minHeight: '100vh',
+    background: '#000',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '2rem',
+  },
+  lockCard: {
+    background: '#0a0a0a',
+    border: '1px solid #222',
+    padding: '3rem',
+    width: '100%',
+    maxWidth: '400px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: '0.75rem',
+  },
+  lockLabel: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: '0.7rem',
+    color: '#444',
+    letterSpacing: '0.2em',
+  },
+  lockTitle: {
+    fontFamily: 'var(--font-title)',
+    fontSize: '1.8rem',
+    color: '#F5F5F0',
+    letterSpacing: '0.1em',
+  },
+  lockSub: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: '0.8rem',
+    color: '#888884',
+    marginBottom: '0.5rem',
+  },
+  lockError: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: '0.8rem',
+    color: '#ff4444',
+    letterSpacing: '0.1em',
   },
 }

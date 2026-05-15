@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import api from '../utils/api'
 
@@ -45,11 +45,74 @@ export default function Game() {
   const [nextChapter, setNextChapter] = useState(null)
   const bottomRef = useRef(null)
 
+  // Sound
+  const audioRef = useRef(null)
+  const [soundOn, setSoundOn] = useState(false)
+
+  // Notes
+  const [notesOpen, setNotesOpen] = useState(false)
+  const [notes, setNotes] = useState('')
+
   useEffect(() => { fetchSession() }, [])
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [messages, thinking, choices])
+
+
+    // Typewriter effect
+  const [displayedMessages, setDisplayedMessages] = useState([])
+  const typewriterRef = useRef(null)
+
+  const typeMessage = useCallback((text, onDone) => {
+    let i = 0
+    setDisplayedMessages(prev => [...prev, { role: 'assistant', content: '' }])
+    clearInterval(typewriterRef.current)
+    typewriterRef.current = setInterval(() => {
+      i++
+      setDisplayedMessages(prev => {
+        const updated = [...prev]
+        updated[updated.length - 1] = { role: 'assistant', content: text.slice(0, i) }
+        return updated
+      })
+      if (i >= text.length) {
+        clearInterval(typewriterRef.current)
+        if (onDone) onDone()
+      }
+    }, 18)
+  }, [])
+
+
+
+  // Sound toggle
+  const toggleSound = () => {
+    if (!audioRef.current) {
+      audioRef.current = new Audio('https://cdn.pixabay.com/audio/2022/10/16/audio_a390ef4f59.mp3')
+      audioRef.current.loop = true
+      audioRef.current.volume = 0.3
+    }
+    if (soundOn) {
+      audioRef.current.pause()
+    } else {
+      audioRef.current.play()
+    }
+    setSoundOn(prev => !prev)
+  }
+
+  // Load notes from localStorage when session loads
+  const loadNotes = (sessionId) => {
+    const saved = localStorage.getItem(`notes_${sessionId}`)
+    if (saved) setNotes(saved)
+  }
+
+  // Save notes to localStorage on every keystroke
+  const handleNotesChange = (e) => {
+    const val = e.target.value
+    setNotes(val)
+    if (session?.session?.id) {
+      localStorage.setItem(`notes_${session.session.id}`, val)
+    }
+  }
 
   const fetchSession = async () => {
     try {
@@ -62,6 +125,8 @@ export default function Game() {
         content: parseAIReply(m.content).clean
       }))
       setMessages(cleaned)
+      setDisplayedMessages(cleaned)
+      loadNotes(res.data.session.id)
     } catch {
       navigate('/dashboard')
     } finally {
@@ -98,20 +163,26 @@ export default function Game() {
         : parsedChoices
 
       setMessages(prev => [...prev, { role: 'assistant', content: clean }])
+      setDisplayedMessages(prev => [...prev, { role: 'user', content: userMessage }])
+      typeMessage(clean, () => {
+        if (res.data.outcome === 'chapter_complete') {
+          setNextChapter(res.data.next_chapter)
+          setOutcome('chapter_complete')
+          setChoices([])
+        } else if (res.data.outcome === 'game_won') {
+          setOutcome('game_won')
+          setChoices([])
+        } else if (res.data.outcome === 'game_over') {
+          setOutcome('game_over')
+          setChoices([])
+        } else {
+          setChoices(finalChoices)
+        }
+      })
 
-      if (res.data.outcome === 'chapter_complete') {
-        setNextChapter(res.data.next_chapter)
-        setOutcome('chapter_complete')
-        setChoices([])
-      } else if (res.data.outcome === 'game_won') {
-        setOutcome('game_won')
-        setChoices([])
-      } else if (res.data.outcome === 'game_over') {
-        setOutcome('game_over')
-        setChoices([])
-      } else {
-        setChoices(finalChoices)
-      }
+      
+
+      
     } catch {
       setMessages(prev => [...prev, {
         role: 'assistant',
@@ -160,6 +231,12 @@ export default function Game() {
           </p>
         </div>
         <div style={styles.headerRight}>
+          <button style={styles.headerBtn} onClick={toggleSound}>
+            {soundOn ? '🔊 ON' : '🔇 OFF'}
+          </button>
+          <button style={styles.headerBtn} onClick={() => setNotesOpen(prev => !prev)}>
+            📓 NOTES
+          </button>
           <p style={styles.characterName}>
             // {session?.character?.name}
           </p>
@@ -168,8 +245,8 @@ export default function Game() {
 
       {/* Messages */}
       <div style={styles.messages}>
-        {messages.map((msg, i) => {
-          const isLast = i === messages.length - 1
+        {displayedMessages.map((msg, i) => {
+          const isLast = i === displayedMessages.length - 1
           const isAI = msg.role === 'assistant'
           return (
             <div key={i}>
@@ -253,6 +330,26 @@ export default function Game() {
           </button>
         </div>
       )}
+
+
+
+      {/* Notes Panel */}
+      {notesOpen && (
+        <div style={styles.notesPanel} className='notes-panel-enter'>
+          <div style={styles.notesHeader}>
+            <p style={styles.notesTitle}>📓 CASE NOTES</p>
+            <button style={styles.notesClose} onClick={() => setNotesOpen(false)}>✕</button>
+          </div>
+          <textarea
+            style={styles.notesArea}
+            value={notes}
+            onChange={handleNotesChange}
+            placeholder={'// jot your clues, suspects, theories...\n\n— Suspect:\n— Motive:\n— Evidence:'}
+          />
+          <p style={styles.notesSaved}>// auto-saved locally</p>
+        </div>
+      )}
+
 
       {/* Outcome overlays */}
       {outcome === 'chapter_complete' && (
@@ -604,5 +701,68 @@ const styles = {
     letterSpacing: '0.2em',
     padding: '0.9rem',
     cursor: 'pointer',
+  },
+  headerBtn: {
+    background: 'transparent',
+    border: '1px solid #222',
+    color: '#888884',
+    fontFamily: 'var(--font-ui)',
+    fontWeight: 600,
+    fontSize: '0.7rem',
+    letterSpacing: '0.15em',
+    padding: '0.3rem 0.75rem',
+    cursor: 'pointer',
+  },
+  notesPanel: {
+    position: 'fixed',
+    top: 0,
+    right: 0,
+    width: '320px',
+    height: '100vh',
+    background: '#0a0a0a',
+    borderLeft: '1px solid #222',
+    display: 'flex',
+    flexDirection: 'column',
+    zIndex: 50,
+  },
+  notesHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: '1rem 1.25rem',
+    borderBottom: '1px solid #1a1a1a',
+  },
+  notesTitle: {
+    fontFamily: 'var(--font-ui)',
+    fontWeight: 600,
+    fontSize: '0.85rem',
+    letterSpacing: '0.2em',
+    color: '#F5F5F0',
+  },
+  notesClose: {
+    background: 'transparent',
+    border: 'none',
+    color: '#888884',
+    fontSize: '1rem',
+    cursor: 'pointer',
+  },
+  notesArea: {
+    flex: 1,
+    background: 'transparent',
+    border: 'none',
+    color: '#F5F5F0',
+    fontFamily: 'var(--font-mono)',
+    fontSize: '0.8rem',
+    lineHeight: 1.8,
+    padding: '1.25rem',
+    resize: 'none',
+    outline: 'none',
+  },
+  notesSaved: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: '0.65rem',
+    color: '#333',
+    padding: '0.75rem 1.25rem',
+    borderTop: '1px solid #1a1a1a',
   },
 }

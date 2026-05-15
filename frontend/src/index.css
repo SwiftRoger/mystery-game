@@ -62,3 +62,12 @@ body {
   80% { transform: translate(1px, -1px); }
   100% { transform: translate(0); }
 }
+
+/* Notes panel slide-in */
+@keyframes slideInRight {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
+}
+.notes-panel-enter {
+  animation: slideInRight 0.25s ease forwards;
+}
