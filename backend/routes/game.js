@@ -318,6 +318,10 @@ Write your narration first. Then append the outcome tag and choices block.
 OUTCOME RULES:
 - Only signal WIN or FAIL when the player has unmistakably met the condition.
 - When in doubt, always use CONTINUE.
+- NEVER mention "win condition", "lose condition", "case solved", or break the fourth wall.
+- NEVER explain why you are triggering WIN or FAIL — just narrate cinematically and tag it.
+- The [OUTCOME:WIN] or [OUTCOME:FAIL] tag must be invisible to the player — it gets stripped out automatically.
+- If you write things like "Note: This is the win condition" you have failed your role.
 
 CHOICES RULES:
 - Make choices feel specific to this exact moment in the story.
