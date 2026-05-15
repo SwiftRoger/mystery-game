@@ -208,6 +208,7 @@ export default function Dashboard() {
           </div>
         </div>
       )}
+      <p style={styles.credit}>// crafted by Swift Roger</p>
     </div>
   )
 }
@@ -459,5 +460,14 @@ const styles = {
     letterSpacing: '0.2em',
     padding: '0.8rem',
     cursor: 'pointer',
+  },
+  credit: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: '0.65rem',
+    color: '#333',
+    letterSpacing: '0.2em',
+    textAlign: 'center',
+    padding: '2rem',
+    position: 'relative',
   },
 }

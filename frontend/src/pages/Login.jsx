@@ -87,6 +87,7 @@ export default function Login() {
           </Link>
         </p>
       </div>
+      <p style={styles.credit}>// crafted by Swift Roger</p>
     </div>
   )
 }
@@ -213,5 +214,13 @@ const styles = {
   anchor: {
     color: '#F5F5F0',
     textDecoration: 'underline',
+  },
+  credit: {
+    fontFamily: 'var(--font-mono)',
+    fontSize: '0.65rem',
+    color: '#333',
+    letterSpacing: '0.2em',
+    marginTop: '2rem',
+    position: 'relative',
   },
 }
