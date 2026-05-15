@@ -5,8 +5,9 @@ const auth = require('../middleware/auth');
 const Groq = require('groq-sdk');
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const MODEL = 'llama-3.1-8b-instant';
 
-// Get active character
+// ─── Get active character ────────────────────────────────────────────────────
 router.get('/character', auth, async (req, res) => {
   try {
     const result = await pool.query(
@@ -20,7 +21,7 @@ router.get('/character', auth, async (req, res) => {
   }
 });
 
-// Get graveyard (retired characters)
+// ─── Get graveyard ───────────────────────────────────────────────────────────
 router.get('/graveyard', auth, async (req, res) => {
   try {
     const result = await pool.query(
@@ -39,7 +40,7 @@ router.get('/graveyard', auth, async (req, res) => {
   }
 });
 
-// Create new character and start game
+// ─── Create new character & start game ──────────────────────────────────────
 router.post('/new', auth, async (req, res) => {
   const { character_name, story_id } = req.body;
 
@@ -51,7 +52,7 @@ router.post('/new', auth, async (req, res) => {
       [req.user.id]
     );
 
-    // Get story and first chapter
+    // Get first chapter
     const chapterResult = await pool.query(
       'SELECT * FROM chapters WHERE story_id = $1 AND chapter_number = 1',
       [story_id]
@@ -63,39 +64,33 @@ router.post('/new', auth, async (req, res) => {
 
     const chapter = chapterResult.rows[0];
 
-    // Create new character
+    // Create character
     const characterResult = await pool.query(
       'INSERT INTO characters (player_id, name, current_chapter) VALUES ($1, $2, 1) RETURNING *',
       [req.user.id, character_name]
     );
-
     const character = characterResult.rows[0];
 
-    // Create game session
+    // Create session
     const sessionResult = await pool.query(
       'INSERT INTO game_sessions (character_id, story_id, chapter_id) VALUES ($1, $2, $3) RETURNING *',
       [character.id, story_id, chapter.id]
     );
-
     const session = sessionResult.rows[0];
 
-    // Generate opening narration from Groq
+    // Generate opening narration
     const opening = await groq.chat.completions.create({
-      model: 'llama-3.1-8b-instant',
+      model: MODEL,
       messages: [
-        {
-          role: 'system',
-          content: buildSystemPrompt(chapter)
-        },
-        {
-          role: 'user',
-          content: `My detective's name is ${character_name}. Begin the story.`
-        }
+        { role: 'system', content: buildSystemPrompt(chapter, character_name) },
+        { role: 'user',   content: `Begin the story. My detective's name is ${character_name}.` }
       ],
       max_tokens: 500
     });
 
-    const openingText = opening.choices[0].message.content;
+    const rawOpening = opening.choices[0].message.content;
+    // Opening should never trigger an outcome, so just strip tags if present
+    const openingText = stripOutcomeTag(rawOpening);
 
     // Save opening to conversation
     await pool.query(
@@ -106,12 +101,7 @@ router.post('/new', auth, async (req, res) => {
     res.status(201).json({
       character,
       session,
-      chapter: {
-        id: chapter.id,
-        chapter_number: chapter.chapter_number,
-        title: chapter.title,
-        content: chapter.content
-      },
+      chapter: sanitizeChapter(chapter),
       opening: openingText
     });
   } catch (err) {
@@ -120,34 +110,25 @@ router.post('/new', auth, async (req, res) => {
   }
 });
 
-// Get current session + conversation history
+// ─── Get current session + conversation history ──────────────────────────────
 router.get('/session', auth, async (req, res) => {
   try {
-    // Get active character
     const characterResult = await pool.query(
       'SELECT * FROM characters WHERE player_id = $1 AND status = $2',
       [req.user.id, 'active']
     );
 
-    if (characterResult.rows.length === 0) {
-      return res.json(null);
-    }
-
+    if (characterResult.rows.length === 0) return res.json(null);
     const character = characterResult.rows[0];
 
-    // Get active session
     const sessionResult = await pool.query(
       'SELECT * FROM game_sessions WHERE character_id = $1 AND status = $2',
       [character.id, 'active']
     );
 
-    if (sessionResult.rows.length === 0) {
-      return res.json(null);
-    }
-
+    if (sessionResult.rows.length === 0) return res.json(null);
     const session = sessionResult.rows[0];
 
-    // Get current chapter
     const chapterResult = await pool.query(
       'SELECT * FROM chapters WHERE story_id = $1 AND chapter_number = $2',
       [session.story_id, character.current_chapter]
@@ -155,21 +136,15 @@ router.get('/session', auth, async (req, res) => {
 
     const chapter = chapterResult.rows[0];
 
-    // Get conversation history
     const convResult = await pool.query(
-      'SELECT * FROM conversations WHERE session_id = $1 ORDER BY created_at ASC',
+      'SELECT role, content, created_at FROM conversations WHERE session_id = $1 ORDER BY created_at ASC',
       [session.id]
     );
 
     res.json({
       character,
       session,
-      chapter: {
-        id: chapter.id,
-        chapter_number: chapter.chapter_number,
-        title: chapter.title,
-        content: chapter.content
-      },
+      chapter: sanitizeChapter(chapter),
       conversation: convResult.rows
     });
   } catch (err) {
@@ -178,190 +153,198 @@ router.get('/session', auth, async (req, res) => {
   }
 });
 
-// Player sends a message
+// ─── Player sends a message ──────────────────────────────────────────────────
 router.post('/action', auth, async (req, res) => {
   const { session_id, message } = req.body;
 
+  if (!message?.trim()) {
+    return res.status(400).json({ message: 'Message cannot be empty' });
+  }
+
   try {
-    // Get session
     const sessionResult = await pool.query(
       'SELECT * FROM game_sessions WHERE id = $1',
       [session_id]
     );
-
     const session = sessionResult.rows[0];
 
-    // Get character
     const characterResult = await pool.query(
       'SELECT * FROM characters WHERE id = $1',
       [session.character_id]
     );
-
     const character = characterResult.rows[0];
 
-    // Get current chapter (with win/fail conditions — never sent to frontend)
     const chapterResult = await pool.query(
       'SELECT * FROM chapters WHERE story_id = $1 AND chapter_number = $2',
       [session.story_id, character.current_chapter]
     );
-
     const chapter = chapterResult.rows[0];
 
-    // Get conversation history
+    // Get conversation history (last 20 turns to keep context window sane)
     const convResult = await pool.query(
-      'SELECT * FROM conversations WHERE session_id = $1 ORDER BY created_at ASC',
+      `SELECT role, content FROM conversations 
+       WHERE session_id = $1 
+       ORDER BY created_at DESC 
+       LIMIT 20`,
       [session_id]
     );
+    const history = convResult.rows.reverse();
 
-    // Build messages array for Groq
-    const messages = [
-      {
-        role: 'system',
-        content: buildSystemPrompt(chapter)
-      },
-      ...convResult.rows.map(c => ({
-        role: c.role,
-        content: c.content
-      })),
-      {
-        role: 'user',
-        content: message
-      }
-    ];
-
-    // Save player message
+    // Save player message first
     await pool.query(
       'INSERT INTO conversations (session_id, role, content) VALUES ($1, $2, $3)',
       [session_id, 'user', message]
     );
 
+    // Build Groq messages
+    const groqMessages = [
+      { role: 'system', content: buildSystemPrompt(chapter, character.name) },
+      ...history,
+      { role: 'user', content: message }
+    ];
+
     // Call Groq
     const response = await groq.chat.completions.create({
-      model: 'llama-3.1-8b-instant',
-      messages,
+      model: MODEL,
+      messages: groqMessages,
       max_tokens: 600
     });
 
-    const aiReply = response.choices[0].message.content;
+    const rawReply = response.choices[0].message.content;
 
-    // Save AI reply
+    // Parse outcome tag from AI reply
+    const { cleanReply, outcome: aiOutcome } = parseOutcome(rawReply);
+
+    // Save clean AI reply (without the hidden tag)
     await pool.query(
       'INSERT INTO conversations (session_id, role, content) VALUES ($1, $2, $3)',
-      [session_id, 'assistant', aiReply]
+      [session_id, 'assistant', cleanReply]
     );
 
-    // Check win/fail conditions
-    const outcome = checkOutcome(message, aiReply, chapter);
-
-    if (outcome === 'win') {
-      // Check if there is a next chapter
-      const nextChapter = await pool.query(
+    // Handle outcomes
+    if (aiOutcome === 'win') {
+      const nextChapterResult = await pool.query(
         'SELECT * FROM chapters WHERE story_id = $1 AND chapter_number = $2',
         [session.story_id, character.current_chapter + 1]
       );
 
-      if (nextChapter.rows.length > 0) {
-        // Advance to next chapter
+      if (nextChapterResult.rows.length > 0) {
+        const nextChapter = nextChapterResult.rows[0];
+
         await pool.query(
           'UPDATE characters SET current_chapter = current_chapter + 1 WHERE id = $1',
           [character.id]
         );
-
         await pool.query(
           'UPDATE game_sessions SET chapter_id = $1 WHERE id = $2',
-          [nextChapter.rows[0].id, session_id]
+          [nextChapter.id, session_id]
         );
 
         return res.json({
-          reply: aiReply,
+          reply: cleanReply,
           outcome: 'chapter_complete',
-          next_chapter: {
-            chapter_number: nextChapter.rows[0].chapter_number,
-            title: nextChapter.rows[0].title,
-            content: nextChapter.rows[0].content
-          }
+          next_chapter: sanitizeChapter(nextChapter)
         });
       } else {
-        // Game complete — all chapters done
         await pool.query(
           'UPDATE game_sessions SET status = $1, ended_at = NOW() WHERE id = $2',
           ['won', session_id]
         );
-
         await pool.query(
-          `UPDATE characters SET status = 'retired', retired_at = NOW(), retired_reason = 'Case solved — legend.'
-           WHERE id = $1`,
+          `UPDATE characters SET status = 'retired', retired_at = NOW(), retired_reason = 'Case solved — legend.' WHERE id = $1`,
           [character.id]
         );
 
-        return res.json({ reply: aiReply, outcome: 'game_won' });
+        return res.json({ reply: cleanReply, outcome: 'game_won' });
       }
     }
 
-    if (outcome === 'fail') {
-      // Retire character
+    if (aiOutcome === 'fail') {
       await pool.query(
-        `UPDATE characters 
-         SET status = 'retired', retired_at = NOW(), retired_reason = $1
-         WHERE id = $2`,
+        `UPDATE characters SET status = 'retired', retired_at = NOW(), retired_reason = $1 WHERE id = $2`,
         [`Failed on Chapter ${character.current_chapter}`, character.id]
       );
-
       await pool.query(
         'UPDATE game_sessions SET status = $1, ended_at = NOW() WHERE id = $2',
         ['lost', session_id]
       );
 
-      return res.json({ reply: aiReply, outcome: 'game_over' });
+      return res.json({ reply: cleanReply, outcome: 'game_over' });
     }
 
-    // Normal response — game continues
-    res.json({ reply: aiReply, outcome: 'continue' });
+    res.json({ reply: cleanReply, outcome: 'continue' });
   } catch (err) {
     console.error(err);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-// Helper — build system prompt for Groq
-function buildSystemPrompt(chapter) {
-  return `You are the narrator of a dark sci-fi murder mystery game called Nebula Noir.
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/**
+ * Build the system prompt for the AI narrator.
+ * Win/fail conditions are secret — only the AI knows them.
+ */
+function buildSystemPrompt(chapter, characterName) {
+  return `You are NOIR, the narrator of a dark sci-fi murder mystery called Nebula Noir.
+
+DETECTIVE: ${characterName}
+CHAPTER ${chapter.chapter_number}: ${chapter.title}
 
 STORY CONTEXT:
 ${chapter.content}
 
-YOUR RULES:
-- Stay strictly within the story. Never break character.
-- Narrate in second person ("You enter the room...").
-- If the player tries to go off-story, redirect them back naturally without breaking immersion.
-- Keep responses under 150 words. Be atmospheric, dark, and cinematic.
-- Do NOT reveal the win or fail conditions directly.
-- If the player is getting close to the win condition, build tension and reward their deduction.
-- If the player is heading toward failure, give subtle warning signs through the narrative.
+═══ NARRATION RULES ═══
+- Narrate in second person ("You push open the door...").
+- Keep responses under 180 words. Be atmospheric, cinematic, and terse.
+- Never break character. Never mention being an AI.
+- If the player goes wildly off-topic, redirect them back into the story naturally.
+- React to what the player does — reward clever deductions, punish recklessness.
+- Build tension as the player gets closer to the truth.
 
-WIN CONDITION (secret — never reveal this directly):
-${chapter.win_condition}
+═══ SECRET CONDITIONS (never reveal these directly) ═══
+WIN CONDITION: ${chapter.win_condition}
+FAIL CONDITION: ${chapter.fail_condition}
 
-FAIL CONDITION (secret — never reveal this directly):
-${chapter.fail_condition}`;
+═══ OUTCOME SIGNALING (CRITICAL) ═══
+After your narration, you MUST append exactly one of these tags on its own line:
+  [OUTCOME:CONTINUE]   — game goes on normally
+  [OUTCOME:WIN]        — the player has clearly met the win condition
+  [OUTCOME:FAIL]       — the player has clearly triggered the fail condition
+
+Only signal WIN or FAIL when the player has unmistakably met the condition through their actions or deductions. Do not trigger early. When in doubt, use CONTINUE.
+
+Example format:
+You find the bloodied keycard beneath the console...
+
+[OUTCOME:CONTINUE]`;
 }
 
-// Helper — check if player hit win or fail condition
-function checkOutcome(playerMessage, aiReply, chapter) {
-  const combined = (playerMessage + ' ' + aiReply).toLowerCase();
-  const win = chapter.win_condition.toLowerCase();
-  const fail = chapter.fail_condition.toLowerCase();
+/**
+ * Parse [OUTCOME:X] tag from AI reply.
+ * Returns { cleanReply, outcome } where outcome is 'win' | 'fail' | 'continue'
+ */
+function parseOutcome(raw) {
+  const match = raw.match(/\[OUTCOME:(WIN|FAIL|CONTINUE)\]/i);
+  const outcome = match ? match[1].toLowerCase() : 'continue';
+  const cleanReply = raw.replace(/\[OUTCOME:(WIN|FAIL|CONTINUE)\]/gi, '').trim();
+  return { cleanReply, outcome };
+}
 
-  // Extract key words from conditions
-  const winKeywords = win.split(' ').filter(w => w.length > 4);
-  const failKeywords = fail.split(' ').filter(w => w.length > 4);
+/**
+ * Strip any stray outcome tags (used on opening narration)
+ */
+function stripOutcomeTag(text) {
+  return text.replace(/\[OUTCOME:(WIN|FAIL|CONTINUE)\]/gi, '').trim();
+}
 
-  const winHits = winKeywords.filter(w => combined.includes(w)).length;
-  const failHits = failKeywords.filter(w => combined.includes(w)).length;
-
-  if (winHits >= 3) return 'win';
-  if (failHits >= 3) return 'fail';
-  return 'continue';
+/**
+ * Remove win_condition and fail_condition before sending chapter to frontend.
+ * Players should never see these.
+ */
+function sanitizeChapter(chapter) {
+  const { win_condition, fail_condition, ...safe } = chapter;
+  return safe;
 }
 
 module.exports = router;
